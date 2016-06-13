@@ -1,24 +1,118 @@
 #!/bin/bash
 
+function echoerr() { echo $@ 1>&2; }
+
 # ##############################################################################
 # Treat command line args
 # ##############################################################################
-if [ -z "$1" ]; then
-    echo "\e[31mPlease specify a source-file from which to start as the first argument"'!'"\e[0m"
+rootFile=
+verbose=0
+nLevels=-1
+while [ ! -z "$1" ]; do
+    case "$1" in
+        -h)
+            cat <<EOF
+Visalize include dependencies of <file>.
+
+    incvis [flags] <rootFile>
+
+Flags:
+
+    -h                  Show this help message
+    -I path[:path[...]] Include directories where to look for
+    -n <levels>         Search up to <levels> parent directories of <rootFile>
+                        for possible include directory roots (0 meaning '.',
+                        1 meaning '..').
+
+Example:
+
+    incvis -I .:.. test.c
+    incvis -n 5 test.c
+EOF
+            ;;
+        -I)
+            shift
+            INC=$1
+            ;;
+        -n)
+            shift
+            nLevels=$1
+            ;;
+        -v)
+            verbose=1
+            ;;
+        *)
+            rootFile=$1
+            ;;
+    esac
+    shift
+done
+
+### Check root file ###
+if [ -z "$rootFile" ]; then
+    echoerr -e "\e[31mPlease specify a source-file from which to start as the first argument"'!'"\e[0m"
     exit 1
 fi
-rootFile=$1
+if [ ! -f "$rootFile" ]; then
+    echoerr -e "\e[31mSpecified file ($rootFile) not found"'!'"\e[0m"
+    exit 1
+fi
 
-if [ ! -z "$2" ]; then INC=":$2"; fi
-INC=${rootFile%/*}$INC:.
+rootFolder=${rootFile%/*}
+if [ "$rootFolder" == "$rootFile" ]; then
+    rootFolder=.
+fi
+if [ -z "$rootFolder" ]; then
+    # This should only happen in rare cases where the file to be analyzed is directly in root ... Who would do that
+    rootFolder='/'
+fi
+cd "$rootFolder"
+rootFile=${rootFile##*/}
+
+### Check number of levels ###
+
+# ${string/substring/replacement}
+#     Replace first match of $substring with $replacement. [2]
+# ${string//substring/replacement}
+#     Replace all matches of $substring with $replacement.
+nLevelsFile=$(cd $rootFolder && pwd) # get absolute path
+# Note that pwd doesn't print trailing / except of course when in root
+if [ "$nLevelsFile" == '/' ]; then
+    nLevelsFile=0
+else
+    nLevelsFile=${nLevelsFile//[^\/]}
+    nLevelsFile=${#nLevelsFile}
+fi
+# Don't allow root
+if [ $nLevels -ge $nLevelsFile ]; then
+    if [ $verbose -eq 1 ]; then
+        echoerr -e "\e[37mParent directory levels to search ($nLevels) are as high or higher ($nLevelsFile) than root"'!'"Reducing to one folder below root\e[0m"
+    fi
+    if [ $nLevelsFile -gt 0 ]; then
+        nLevels=$((nLevelsFile-1))
+    else
+        nLevels=0
+    fi
+fi
+
+### Check include paths ###
+
+if [ ! -z "$INC" ]; then
+    INC=$INC:
+fi
+INC=$INC:$rootFolder
 
 #INC_ARR=$(echo $INC | tr ":" "\n")
 IFS=":" read -a includePaths <<< "$INC"
-echo -e "\e[37mInclude Paths (first will be searched first):"
-for path in ${includePaths[@]}; do
-    echo "    $path"
-done
-echo -e "\e[0m"
+if [ $verbose -eq 1 ]; then
+    echoerr -e "\e[37mInclude Paths (first will be searched first):"
+    for path in ${includePaths[@]}; do
+        echoerr "    $path"
+    done
+    echoerr -e "\e[0m"
+fi
+
+############################### Begin Main Logic ###############################
 
 searchedPaths=()
 
@@ -34,7 +128,7 @@ printAllIncludes() {
     #if [ ! $indent -eq 0 ]; then
     #    printf "+ ";
     #fi
-    printf "%s" "$file"
+    printf '%s' "$file"
 
     # search for file in paths to determine if already found and we can stop parsing it
     local found=0
@@ -52,17 +146,55 @@ printAllIncludes() {
     # parse dependencies recursively
     for (( i=0; i<${#includes[@]}; i++ )); do
     {
+        includeFile=${includes[i]}
         # try to find file in include paths
         foundPath=
         for path in ${file%/*} ${includePaths[@]}; do
-            #echo -e "\e[36m path = $path \e[0m"
-            if [ -f "$path/${includes[i]}" ]; then
-                foundPath="$path/${includes[i]}"
+            #echoerr -e "\e[36m path = $path \e[0m"
+            if [ -f "$path/$includeFile" ]; then
+                foundPath="$path/$includeFile"
                 break
             fi
         done
+
+        # if no suitable path found, try upper directories
         if [ ! -f "$foundPath" ]; then
-            echo -e "\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m"
+            upperDir=.
+            for (( iLevel=0; iLevel<=nLevels; iLevel++ )); do
+                includeFileName=${includeFile##*/}
+                foundFiles=$(find $upperDir -name "$includeFileName" 2>/dev/null)
+                nFiles=$(echo "$foundFiles" | wc -l)
+                if [ -z "$foundFiles" ]; then
+                    nFiles=0
+                fi
+                #if [ $verbose -eq 1 ]; then
+                #    echoerr -e "\e[37mTrying '$(cd $upperDir && pwd)'. Found $nFiles file(s):\n$foundFiles\e[0m"
+                #fi
+                if [ $nFiles -eq 1 ]; then
+                    incRoot=${foundFiles%%$includeFileName}
+                    if [ "${incRoot:${#incRoot}-1:1}" == '/' ]; then
+                        incRoot=${incRoot:0:-1}
+                    fi
+                    includePaths+=( "$incRoot" )
+                    if [ $verbose -eq 1 ]; then
+                        echoerr -e "\e[37m\nAdding '$incRoot' to include paths.\e[0m"
+                    fi
+                    foundPath=$incRoot/$includeFileName
+                    break
+                elif [ $nFiles -gt 1 ]; then
+                    if [ $verbose -eq 1 ]; then
+                        echoerr -e "\e[31mAmbiguous include paths possible:\n$foundFiles\nSkipping this"'!'"\e[0m"
+                    fi
+                    break
+                fi
+                upperDir=$upperDir/..
+            done
+        fi
+
+        if [ ! -f "$foundPath" ]; then
+            #if [ $verbose -eq 1 ]; then
+                echoerr -e "\n\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m"
+            #fi
             continue
         fi
 
@@ -77,3 +209,6 @@ printAllIncludes() {
 
 printAllIncludes "$rootFile" 0
 printf "\n"
+if [ $nLevels -ge 0 ]; then
+    ( IFS=':'; echo -e "Include Paths:\n    ${includePaths[*]}\n" )
+fi
