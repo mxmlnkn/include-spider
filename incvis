@@ -8,6 +8,8 @@ function echoerr() { echo $@ 1>&2; }
 rootFile=
 verbose=0
 nLevels=-1
+language=auto
+quiet=0
 while [ ! -z "$1" ]; do
     case "$1" in
         -h)
@@ -18,27 +20,44 @@ Visalize include dependencies of <file>.
 
 Flags:
 
-    -h                  Show this help message
-    -I path[:path[...]] Include directories where to look for
-    -n <levels>         Search up to <levels> parent directories of <rootFile>
-                        for possible include directory roots (0 meaning '.',
-                        1 meaning '..').
+  -h                  Show this help message
+  -l <auto|cpp|java>  Language style includes to parse (auto: choose by extension)
+  -I path[:path[...]] Include directories where to look for
+  -n <levels>         Search up to <levels> parent directories of <rootFile>
+                      for possible include directory roots (0 meaning '.',
+                      1 meaning '..'). Default: up to current directory.
+  -q                  Suppress warnings like not finding system libraries
 
-Example:
+Examples:
 
     incvis -I .:.. test.c
     incvis -n 5 test.c
 EOF
             ;;
-        -I)
+        -I|--include)
             shift
             INC=$1
             ;;
-        -n)
+        -l|--language)
+            shift
+            case "$1" in
+                auto) ;;
+                cpp)  ;;
+                java) ;;
+                *)
+                    echo "Unknown language '$1' specified"'!'
+                    ;;
+            esac
+            language=$1
+            ;;
+        -n|--nlevels)
             shift
             nLevels=$1
             ;;
-        -v)
+        -q|--quiet)
+            quiet=1
+            ;;
+        -v|--verbose)
             verbose=1
             ;;
         *)
@@ -66,16 +85,17 @@ if [ -z "$rootFolder" ]; then
     # This should only happen in rare cases where the file to be analyzed is directly in root ... Who would do that
     rootFolder='/'
 fi
-cd "$rootFolder"
-rootFile=${rootFile##*/}
+rootFileName=${rootFile##*/}
 
 ### Check number of levels ###
 
+curPath=$(pwd)
 # ${string/substring/replacement}
 #     Replace first match of $substring with $replacement. [2]
 # ${string//substring/replacement}
 #     Replace all matches of $substring with $replacement.
-nLevelsFile=$(cd $rootFolder && pwd) # get absolute path
+#nLevelsFile=$(cd "$rootFolder" && pwd) # get absolute path
+nLevelsFile=$(pwd) # get absolute path
 # Note that pwd doesn't print trailing / except of course when in root
 if [ "$nLevelsFile" == '/' ]; then
     nLevelsFile=0
@@ -83,7 +103,15 @@ else
     nLevelsFile=${nLevelsFile//[^\/]}
     nLevelsFile=${#nLevelsFile}
 fi
-# Don't allow root
+
+# # by default search in all paths up to current for includes
+# nRelLevelsFile=$(cd "$rootFolder" && pwd)
+# nRelLevelsFile=${nRelLevelsFile#$curPath}
+# nRelLevelsFile=${nRelLevelsFile//[^\/]}
+# nRelLevelsFile=${#nRelLevelsFile}
+# nLevels=$nRelLevelsFile
+
+# Don't allow to analyze files in root folder /
 if [ $nLevels -ge $nLevelsFile ]; then
     if [ $verbose -eq 1 ]; then
         echoerr -e "\e[37mParent directory levels to search ($nLevels) are as high or higher ($nLevelsFile) than root"'!'"Reducing to one folder below root\e[0m"
@@ -94,6 +122,10 @@ if [ $nLevels -ge $nLevelsFile ]; then
         nLevels=0
     fi
 fi
+
+
+
+#cd "$rootFolder"
 
 ### Check include paths ###
 
@@ -111,6 +143,43 @@ if [ $verbose -eq 1 ]; then
     done
     echoerr -e "\e[0m"
 fi
+
+function getIncludes() {
+    local filePath=$1
+    local lang=$language
+    if [ "$lang" == 'auto' ]; then
+        case "${filePath##*.}" in
+            'c'|'cpp'|'cxx'|'cu'|'h'|'hpp'|'tpp')
+                lang=cpp
+                ;;
+            'java')
+                lang=java
+                ;;
+            *)
+                echoerr -e "\e[31mError unknown file extension of included file '$filePath'"'!'" Please add the extension to this script or specify a language with the -l option"'!'"\e[0m"
+                return
+                ;;
+        esac
+    fi
+    case "$lang" in
+        'cpp')
+            # #include "file.h"
+            # #include <file.h>  // ignore, because most often in system path (?)
+            # ignore commented lines starting: [^/]
+            sed -nE 's|^[^/]*#[ \t]*include[ \t]*["<]([^">]*)[">].*|\1|p;' "$filePath"
+            ;;
+        'java')
+            # import java.util.List;
+            # ignore system libraries beginning with 'java.' (?) maybe as an option
+            # TODO: heed wildcards like import mylib.*;
+            sed -nE 's|^[^/]*import[ \t]*([^;]*);.*|\1|p;' "$filePath" | sed 's|\.|/|g; s|$|.java|;'
+            ;;
+        *)
+            echoerr -e "\e[31mNo parsing routine exists for language '$lang' yet"'!'"\e[0m"
+            return
+            ;;
+    esac
+}
 
 ############################### Begin Main Logic ###############################
 
@@ -131,7 +200,6 @@ printAllIncludes() {
     printf '%s' "$file"
 
     # search for file in paths to determine if already found and we can stop parsing it
-    local found=0
     for path in ${searchedPaths[@]}; do
         if [ "$path" == "$file" ]; then
             printf " -> already loaded"
@@ -140,7 +208,7 @@ printAllIncludes() {
     done
 
     # http://stackoverflow.com/questions/19771965/split-bash-string-by-newline-characters
-    IFS=$'\n' read -rd '' -a includes <<<"$(sed -nE 's/^[^/]*#[ \t]*include[ \t]*"([^"]*)".*/\1/p;' "$file")"
+    IFS=$'\n' read -rd '' -a includes <<<"$(getIncludes "$file")"
     searchedPaths+=( "$file" )
 
     # parse dependencies recursively
@@ -161,8 +229,9 @@ printAllIncludes() {
         if [ ! -f "$foundPath" ]; then
             upperDir=.
             for (( iLevel=0; iLevel<=nLevels; iLevel++ )); do
+                includeFileFolder=${includeFile%/*}
                 includeFileName=${includeFile##*/}
-                foundFiles=$(find $upperDir -name "$includeFileName" 2>/dev/null)
+                foundFiles=$(find "$upperDir/$includeFileFolder" -name "$includeFileName" 2>/dev/null)
                 nFiles=$(echo "$foundFiles" | wc -l)
                 if [ -z "$foundFiles" ]; then
                     nFiles=0
@@ -187,22 +256,24 @@ printAllIncludes() {
                     fi
                     break
                 fi
-                upperDir=$upperDir/..
+                # this is important for find to not return paths like ./../../folder
+                if [ "$upperDir" == '.' ]; then
+                    upperDir=..
+                else
+                    upperDir=$upperDir/..
+                fi
             done
         fi
 
         if [ ! -f "$foundPath" ]; then
-            #if [ $verbose -eq 1 ]; then
+            if [ $quiet -eq 0 ]; then
                 echoerr -e "\n\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m"
-            #fi
+            fi
             continue
         fi
 
-        # not already parsed, so do it
-        if [ $found -eq 0 ]; then
-            printf "\n"
-            printAllIncludes "$foundPath" $(($2+1))
-        fi
+        printf "\n"
+        printAllIncludes "$foundPath" $(($2+1))
     }
     done
 }
