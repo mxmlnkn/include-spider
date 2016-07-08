@@ -1,148 +1,6 @@
 #!/bin/bash
 
-function echoerr() { echo $@ 1>&2; }
-
-# ##############################################################################
-# Treat command line args
-# ##############################################################################
-rootFile=
-verbose=0
-nLevels=-1
-language=auto
-quiet=0
-while [ ! -z "$1" ]; do
-    case "$1" in
-        -h)
-            cat <<EOF
-Visalize include dependencies of <file>.
-
-    incvis [flags] <rootFile>
-
-Flags:
-
-  -h                  Show this help message
-  -l <auto|cpp|java>  Language style includes to parse (auto: choose by extension)
-  -I path[:path[...]] Include directories where to look for
-  -n <levels>         Search up to <levels> parent directories of <rootFile>
-                      for possible include directory roots (0 meaning '.',
-                      1 meaning '..'). Default: up to current directory.
-  -q                  Suppress warnings like not finding system libraries
-
-Examples:
-
-    incvis -I .:.. test.c
-    incvis -n 5 test.c
-EOF
-            ;;
-        -I|--include)
-            shift
-            INC=$1
-            ;;
-        -l|--language)
-            shift
-            case "$1" in
-                auto) ;;
-                cpp)  ;;
-                java) ;;
-                *)
-                    echo "Unknown language '$1' specified"'!'
-                    ;;
-            esac
-            language=$1
-            ;;
-        -n|--nlevels)
-            shift
-            nLevels=$1
-            ;;
-        -q|--quiet)
-            quiet=1
-            ;;
-        -v|--verbose)
-            verbose=1
-            ;;
-        *)
-            rootFile=$1
-            ;;
-    esac
-    shift
-done
-
-### Check root file ###
-if [ -z "$rootFile" ]; then
-    echoerr -e "\e[31mPlease specify a source-file from which to start as the first argument"'!'"\e[0m"
-    exit 1
-fi
-if [ ! -f "$rootFile" ]; then
-    echoerr -e "\e[31mSpecified file ($rootFile) not found"'!'"\e[0m"
-    exit 1
-fi
-
-rootFolder=${rootFile%/*}
-if [ "$rootFolder" == "$rootFile" ]; then
-    rootFolder=.
-fi
-if [ -z "$rootFolder" ]; then
-    # This should only happen in rare cases where the file to be analyzed is directly in root ... Who would do that
-    rootFolder='/'
-fi
-rootFileName=${rootFile##*/}
-
-### Check number of levels ###
-
-curPath=$(pwd)
-# ${string/substring/replacement}
-#     Replace first match of $substring with $replacement. [2]
-# ${string//substring/replacement}
-#     Replace all matches of $substring with $replacement.
-#nLevelsFile=$(cd "$rootFolder" && pwd) # get absolute path
-nLevelsFile=$(pwd) # get absolute path
-# Note that pwd doesn't print trailing / except of course when in root
-if [ "$nLevelsFile" == '/' ]; then
-    nLevelsFile=0
-else
-    nLevelsFile=${nLevelsFile//[^\/]}
-    nLevelsFile=${#nLevelsFile}
-fi
-
-# # by default search in all paths up to current for includes
-# nRelLevelsFile=$(cd "$rootFolder" && pwd)
-# nRelLevelsFile=${nRelLevelsFile#$curPath}
-# nRelLevelsFile=${nRelLevelsFile//[^\/]}
-# nRelLevelsFile=${#nRelLevelsFile}
-# nLevels=$nRelLevelsFile
-
-# Don't allow to analyze files in root folder /
-if [ $nLevels -ge $nLevelsFile ]; then
-    if [ $verbose -eq 1 ]; then
-        echoerr -e "\e[37mParent directory levels to search ($nLevels) are as high or higher ($nLevelsFile) than root"'!'"Reducing to one folder below root\e[0m"
-    fi
-    if [ $nLevelsFile -gt 0 ]; then
-        nLevels=$((nLevelsFile-1))
-    else
-        nLevels=0
-    fi
-fi
-
-
-
-#cd "$rootFolder"
-
-### Check include paths ###
-
-if [ ! -z "$INC" ]; then
-    INC=$INC:
-fi
-INC=$INC:$rootFolder
-
-#INC_ARR=$(echo $INC | tr ":" "\n")
-IFS=":" read -a includePaths <<< "$INC"
-if [ $verbose -eq 1 ]; then
-    echoerr -e "\e[37mInclude Paths (first will be searched first):"
-    for path in ${includePaths[@]}; do
-        echoerr "    $path"
-    done
-    echoerr -e "\e[0m"
-fi
+function echoerr() { echo "$@" 1>&2; }
 
 function getIncludes() {
     local filePath=$1
@@ -172,7 +30,7 @@ function getIncludes() {
             # import java.util.List;
             # ignore system libraries beginning with 'java.' (?) maybe as an option
             # TODO: heed wildcards like import mylib.*;
-            sed -nE 's|^[^/]*import[ \t]*([^;]*);.*|\1|p;' "$filePath" | sed 's|\.|/|g; s|$|.java|;'
+            sed -nE 's|^[^/]*import[ \t]*([^;]*);.*|\1|p;' "$filePath" | sed '/^java\./d; s|\.|/|g; s|$|.java|;'
             ;;
         *)
             echoerr -e "\e[31mNo parsing routine exists for language '$lang' yet"'!'"\e[0m"
@@ -180,6 +38,230 @@ function getIncludes() {
             ;;
     esac
 }
+
+function realPath() {
+    local path=$1
+    local name=
+    if [ ! -d "$path" ]; then
+        name=/$(basename "$path")
+        path=$(dirname  "$path")
+    fi
+    echo "$(cd "$path" && pwd)$name"
+}
+
+function getPathDepth() {
+    local path=$1
+    if [ -d "$path" ]; then
+        path=$( cd "$path" && pwd )
+    else
+        # collapse relative path specifications
+        path=$(echo "$path" | sed 's|\./|g; s|[^/]+/\.\./||g')
+    fi
+    if [ "$path" == '/' ]; then
+        echo 0
+    fi
+    path=${path//[^\/]}
+    echo ${#path}
+}
+
+function getCommonPrefix() {
+    # e.g. for $1="test mimi"
+    # and      $2="test meh"
+    # return      "test m"
+    #
+    # The idea is to use a backreference to match the same text again
+    # after a newline
+    printf "%s\n%s\n" "$1" "$2" | sed -r 'N;s|^(.*).*\n\1.*$|\1|'
+}
+
+function getRelativePath() {
+    # returns relative path to from source to target
+    local source=$1
+    local target=$2
+
+    local tname=
+    if [ -f "$target" ]; then
+        tname=/$(basename "$target")
+        target=$(dirname  "$target")
+    fi
+
+    if [ -d "$source" ]; then source=$(cd "$source" && pwd); fi
+    if [ -d "$target" ]; then target=$(cd "$target" && pwd); fi
+
+    if [ "${source:0:1}" != '/' ]; then
+        echo -e "\e[31mThe specified source '$source' is neither an absolute path nor does it seem to exist i.e. it is not reachable from the current path"'!'"\e[0m" 1>&2
+    fi
+    if [ "${target:0:1}" != '/' ]; then
+        echo -e "\e[31mThe specified target '$target' is neither an absolute path nor does it seem to exist i.e. it is not reachable from the current path"'!'"\e[0m" 1>&2
+    fi
+
+    local prefix=$source
+    local relative=${target#$prefix}
+    local result=""
+    while [ ! -z "$prefix" ] && [ "$relative" == "$target" ]; do
+        prefix="${prefix%/*}"
+        relative=${target#$prefix}
+        if [ -z "$result" ]; then
+            result=".."
+        else
+            result="../$result"
+        fi
+    done
+    result=$result/${relative#/}
+    result=${result#/}
+    result=${result%/}
+    if [ -z "$result" ]; then
+        echo ".$tname"
+    else
+        echo "$result$tname"
+    fi
+}
+
+function testGetRelativePath() {
+    local src='/A/B/C'
+    local targets=( '/A' '/A/B' '/A/B/C' '/A/B/C/D' '/A/B/C/D/E' '/A/B/D' '/A/B/D/E' '/A/D' '/A/D/E' '/D/E/F' )
+    local relatives=( '../..' '..' '.' 'D' 'D/E' '../D' '../D/E' '../../D' '../../D/E' '../../../D/E/F' )
+    for (( i=0; i<${#targets[@]}; ++i )); do
+        printf "\e[37mgetRelativePath %s %10s == %16s\e[0m" \
+               "$src" "${targets[i]}" "${relatives[i]}"
+        local result=$(getRelativePath "$src" "${targets[i]}")
+        if [ "$result" != "${relatives[i]}" ]; then
+            echo -e "\e[31m failed ($result)\e[0m"
+        else
+            echo -e "\e[32m OK\e[0m"
+        fi
+    done
+}
+
+# ##############################################################################
+# Treat command line args
+# ##############################################################################
+
+rootFile=
+rootFolder=
+verbose=0
+nLevels=0
+language=auto
+quiet=0
+relative=0
+while [ ! -z "$1" ]; do
+    case "$1" in
+        -h)
+            cat <<EOF
+Visalize include dependencies of <file>.
+
+    incvis [flags] <rootFile>
+
+Flags:
+
+  -C <rootFolder>     Change root folder. This affects include paths and the -n option
+  -h                  Show this help message
+  -l <auto|cpp|java>  Language style includes to parse (auto: choose by extension)
+  -I path[:path[...]] Include directories where to look for. Either absolute or
+                      relative to <rootFolder>
+  -n <levels>         Search up to <levels> parent directories of <rootFolder>
+  -q                  Suppress warnings like not finding system libraries
+  -r                  Show all include paths relative to the file which includes it
+
+Examples:
+
+    incvis -I .:.. test.c
+    incvis -n 5 test.c
+EOF
+            ;;
+        -C)
+            shift
+            rootFolder=$1
+            ;;
+        -I|--include)
+            shift
+            INC=$1
+            ;;
+        -l|--language)
+            shift
+            case "$1" in
+                auto) ;;
+                cpp)  ;;
+                java) ;;
+                *)
+                    echo "Unknown language '$1' specified"'!'
+                    ;;
+            esac
+            language=$1
+            ;;
+        -n|--nlevels)
+            shift
+            nLevels=$1
+            ;;
+        -q|--quiet)
+            quiet=1
+            ;;
+        -r|--relative)
+            relative=1
+            ;;
+        -v|--verbose)
+            verbose=1
+            ;;
+        *)
+            rootFile=$1
+            ;;
+    esac
+    shift
+done
+
+### Check if root file exists ###
+if [ -z "$rootFile" ]; then
+    echoerr -e "\e[31mPlease specify a source-file from which to start crawling"'!'"\e[0m"
+    exit 1
+elif [ ! -f "$rootFile" ]; then
+    echoerr -e "\e[31mSpecified file ($rootFile) not found"'!'"\e[0m"
+    exit 1
+fi
+rootFileName=$(basename "$rootFile")
+if [ -z "$rootFolder" ]; then
+    rootFolder=$(cd "$(dirname "$rootFile")" && pwd)
+    #rootFolder=$(pwd)  # Can't decide which is better ...
+else
+    # the file to analyze must be in the root folder
+    if [ ! -d "$rootFolder" ]; then
+        echoerr -e "\e[31mSpecified root folder ($rootFolder) not found"'!'"\e[0m"
+        exit 1
+    fi
+    rootFolder=$( cd "$rootFolder" && pwd )
+    tmpFolder=$( cd "$(dirname "$rootFile")" && pwd )
+    if [ "${tmpFolder#$rootFolder}" == "$tmpFolder" ]; then
+        echoerr -e "\e[31mThe root folder ($rootFolder) must contain the initial file ($rootFile -> $tmpFolder)"'!'"\e[0m"
+        exit 1
+    fi
+fi
+
+rootFolderLevel=$(getPathDepth "$rootFolder")
+minDepth=$((rootFolderLevel - nLevels))
+if [ "$minDepth" -lt 2 ]; then
+    if [ $verbose -eq 1 ]; then
+        echoerr -e "\e[37mParent directory levels to search ($nLevels) are as high or higher ($nLevelsFile) than '/dir'. This is not allowed as the resulting file searches may be very slow"'!'"Reducing to two folders below root\e[0m"
+    fi
+    minDepth=2
+fi
+
+
+### Check include paths ###
+
+if [ ! -z "$INC" ]; then
+    INC=$INC:
+fi
+INC=$INC:. # $rootFolder
+
+#INC_ARR=$(echo $INC | tr ":" "\n")
+IFS=":" read -a includePaths <<< "$INC"
+if [ $verbose -eq 1 ]; then
+    echoerr -e "\e[37mInclude Paths (first will be searched first):"
+    for path in ${includePaths[@]}; do
+        echoerr "    $path"
+    done
+    echoerr -e "\e[0m"
+fi
+
 
 ############################### Begin Main Logic ###############################
 
@@ -193,11 +275,12 @@ printAllIncludes() {
 
     # print current file
     indent=$(($level * 4))
-    printf "%.*s" $indent "                             "
+    printf "%.*s" $indent "                                                    "
     #if [ ! $indent -eq 0 ]; then
     #    printf "+ ";
     #fi
-    printf '%s' "$file"
+    #printf '%s' "${file#$rootFolder}"
+    printf '%s' "$(getRelativePath "$rootFolder" "$file")"
 
     # search for file in paths to determine if already found and we can stop parsing it
     for path in ${searchedPaths[@]}; do
@@ -227,47 +310,69 @@ printAllIncludes() {
 
         # if no suitable path found, try upper directories
         if [ ! -f "$foundPath" ]; then
-            upperDir=.
-            for (( iLevel=0; iLevel<=nLevels; iLevel++ )); do
+            upperDir="$(cd "$(dirname "$file")" && pwd)"
+            while [ $(getPathDepth "$upperDir") -ge $minDepth ]; do
                 includeFileFolder=${includeFile%/*}
                 includeFileName=${includeFile##*/}
-                foundFiles=$(find "$upperDir/$includeFileFolder" -name "$includeFileName" 2>/dev/null)
-                nFiles=$(echo "$foundFiles" | wc -l)
-                if [ -z "$foundFiles" ]; then
-                    nFiles=0
+                if [ $verbose -eq 1 ]; then
+                    echoerr "find '$upperDir/$includeFileFolder' -name '$includeFileName'"
                 fi
-                #if [ $verbose -eq 1 ]; then
-                #    echoerr -e "\e[37mTrying '$(cd $upperDir && pwd)'. Found $nFiles file(s):\n$foundFiles\e[0m"
-                #fi
-                if [ $nFiles -eq 1 ]; then
-                    incRoot=${foundFiles%%$includeFileName}
+                IFS=$'\n' read -rd '' -a tmpFoundFiles <<<"$(find "$upperDir/$includeFileFolder" -name "$includeFileName" 2>/dev/null)"
+
+                # test that not only file name, but also path match
+                foundFiles=()
+                for file in ${tmpFoundFiles[@]}; do
+                    file=$(realPath "$file")
+                    if [ "${file%$includeFile}" != "$file" ]; then
+                        foundFiles+=("$file")
+                    elif [ $verbose -eq 1 ]; then
+                        echoerr -e "\e[37mSorting out '$file', because path does not match '$includeFile'\e[0m"
+                    fi
+                done
+
+                if [ $verbose -eq 1 ]; then
+                    echoerr -e "\e[37mTrying '$(cd $upperDir && pwd)'. Found ${#tmpFoundFiles[@]} file(s):\e[0m"
+                    for file in ${tmpFoundFiles[@]}; do
+                        echo "  $(realPath "$file")"
+                    done
+                    echoerr "out of which these remain:"
+                    for file in ${foundFiles[@]}; do
+                        echo "  $file"
+                    done
+                fi
+
+                if [ ${#foundFiles[@]} -gt 1 ]; then
+                    if [ $verbose -eq 1 ]; then
+                        echoerr -e "\e[31mAmbiguous include paths possible:\n$foundFile\nSkipping this"'!'"\e[0m"
+                    fi
+                    break
+                elif [ ${#foundFiles[@]} -eq 1 ]; then
+                    foundFile=${foundFiles[0]}
+                    incRoot=${foundFile%%$includeFile}
                     if [ "${incRoot:${#incRoot}-1:1}" == '/' ]; then
                         incRoot=${incRoot:0:-1}
                     fi
-                    includePaths+=( "$incRoot" )
+                    includePaths+=( "${incRoot#$rootFolder}" )
                     if [ $verbose -eq 1 ]; then
                         echoerr -e "\e[37m\nAdding '$incRoot' to include paths.\e[0m"
                     fi
-                    foundPath=$incRoot/$includeFileName
-                    break
-                elif [ $nFiles -gt 1 ]; then
-                    if [ $verbose -eq 1 ]; then
-                        echoerr -e "\e[31mAmbiguous include paths possible:\n$foundFiles\nSkipping this"'!'"\e[0m"
-                    fi
+                    foundPath=$incRoot/$includeFile
                     break
                 fi
-                # this is important for find to not return paths like ./../../folder
-                if [ "$upperDir" == '.' ]; then
-                    upperDir=..
-                else
-                    upperDir=$upperDir/..
-                fi
+
+                upperDir=$upperDir/..
             done
         fi
 
         if [ ! -f "$foundPath" ]; then
             if [ $quiet -eq 0 ]; then
-                echoerr -e "\n\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m"
+                echoerr -e "\n\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m
+  minDepth   = $minDepth
+  upperDir   = $upperDir -> $(cd "$upperDir" && pwd) [depth: $(getPathDepth "$upperDir")]
+  rootFolder = $rootFolder [depth: $(getPathDepth "$rootFolder")]
+  pwd        = $(pwd)
+  file       = $file
+"
             fi
             continue
         fi
@@ -280,6 +385,6 @@ printAllIncludes() {
 
 printAllIncludes "$rootFile" 0
 printf "\n"
-if [ $nLevels -ge 0 ]; then
+#if [ $nLevels -ge 0 ]; then
     ( IFS=':'; echo -e "Include Paths:\n    ${includePaths[*]}\n" )
-fi
+#fi
