@@ -2,6 +2,10 @@
 
 function echoerr() { echo "$@" 1>&2; }
 
+function escapeRegex() {
+    echo "$@" | sed -r 's|([][^$.*\])|\\\1|g'
+}
+
 function getIncludes() {
     local filePath=$1
     local lang=$language
@@ -31,6 +35,32 @@ function getIncludes() {
             # ignore system libraries beginning with 'java.' (?) maybe as an option
             # TODO: heed wildcards like import mylib.*;
             sed -nE 's|^[^/]*import[ \t]*([^;]*);.*|\1|p;' "$filePath" | sed '/^java\./d; s|\.|/|g; s|$|.java|;'
+
+            # find implicit includes i.e. used classes in the current directory
+            local localClasses file name
+            #echoerr "find '$(dirname "$filePath")' -maxdepth 1 -type f -iname '*.java'"
+            IFS=$'\n' read -rd '' -a localClasses <<<"$(
+                find "$(dirname "$filePath")" -maxdepth 1 -type f -iname '*.java'
+            )"
+
+            if [ $verbose -eq 1 ]; then
+                echoerr "Test the following classs int he same folder for usage:"
+                for file in ${localClasses[@]}; do
+                    echoerr "  $file"
+                done
+            fi
+
+            for file in ${localClasses[@]}; do
+                if [ "$(realPath "$file")" == "$(realPath "$filePath")" ]; then
+                    continue
+                fi
+                name=$(basename "$file")
+                name=${name%\.java}
+                # echoerr 'grep -E -q "^(.*[^a-zA-Z0-9])*'"$(escapeRegex "$name")"'([^a-zA-Z0-9].*)*$" '"$filePath"
+                if grep -E -q '^(.*[^a-zA-Z0-9])*'"$(escapeRegex "$name")"'([^a-zA-Z0-9].*)*$' "$filePath"; then
+                    echo "$(basename "$file")"
+                fi
+            done
             ;;
         *)
             echoerr -e "\e[31mNo parsing routine exists for language '$lang' yet"'!'"\e[0m"
@@ -250,7 +280,7 @@ fi
 if [ ! -z "$INC" ]; then
     INC=$INC:
 fi
-INC=$INC:. # $rootFolder
+INC=$INC:.:$rootFolder
 
 #INC_ARR=$(echo $INC | tr ":" "\n")
 IFS=":" read -a includePaths <<< "$INC"
@@ -273,6 +303,16 @@ printAllIncludes() {
     file=$1
     level=$2
 
+    for path in ${searchedPaths[@]}; do
+        if [ "$path" == "$file" ]; then
+            if [ $quiet -eq 1 ]; then
+                return 1
+            fi
+            echo -ne "\e[37m"
+            break
+        fi
+    done
+
     # print current file
     indent=$(($level * 4))
     printf "%.*s" $indent "                                                    "
@@ -285,10 +325,11 @@ printAllIncludes() {
     # search for file in paths to determine if already found and we can stop parsing it
     for path in ${searchedPaths[@]}; do
         if [ "$path" == "$file" ]; then
-            printf " -> already loaded"
+            printf " -> already loaded\e[0m"
             return 1
         fi
     done
+    printf "\n"
 
     # http://stackoverflow.com/questions/19771965/split-bash-string-by-newline-characters
     IFS=$'\n' read -rd '' -a includes <<<"$(getIncludes "$file")"
@@ -377,7 +418,6 @@ printAllIncludes() {
             continue
         fi
 
-        printf "\n"
         printAllIncludes "$foundPath" $(($2+1))
     }
     done
