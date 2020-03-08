@@ -1,5 +1,27 @@
 #!/bin/bash
 
+# ToDo:
+#  - Add option for styled output:
+#       entry/Main.java
+#       +- configuration/Configuration.java
+#       |  +- util/ResourceReader.java
+#       |  |  +- configuration/RootbeerPaths.java
+#  - recognize java wildcard imports like
+#       import org.trifort.rootbeer.compiler.*;
+#  - recognize class imports which are subclasses, e.g.
+#       import org.trifort.rootbeer.generate.opencl.tweaks.GencodeOptions.CompileArchitecture;
+#    where only org/trifort/rootbeer/generate/opencl/tweaks/GencodeOptions.java
+#    exists, but no extra file
+#    org/trifort/rootbeer/generate/opencl/tweaks/GencodeOptions/CompileArchitecture.java
+#       public class GencodeOptions
+#       {
+#           public enum CompileArchitecture {
+#               Arch32bit, Arch64bit, Arch32bit64bit;
+#           }
+#  - option to print paths relative to parent path. Could shorten output length
+#  - try to find unneeded includes
+
+
 function echoerr() { echo "$@" 1>&2; }
 
 function escapeRegex() {
@@ -44,7 +66,7 @@ function getIncludes() {
             )"
 
             if [ $verbose -eq 1 ]; then
-                echoerr "Test the following classs int he same folder for usage:"
+                echoerr "Test the following classs in the same folder for usage:"
                 for file in ${localClasses[@]}; do
                     echoerr "  $file"
                 done
@@ -292,7 +314,6 @@ if [ $verbose -eq 1 ]; then
     echoerr -e "\e[0m"
 fi
 
-
 ############################### Begin Main Logic ###############################
 
 searchedPaths=()
@@ -325,7 +346,7 @@ printAllIncludes() {
     # search for file in paths to determine if already found and we can stop parsing it
     for path in ${searchedPaths[@]}; do
         if [ "$path" == "$file" ]; then
-            printf " -> already loaded\e[0m"
+            printf " -> already loaded\e[0m\n"
             return 1
         fi
     done
@@ -406,19 +427,13 @@ printAllIncludes() {
         fi
 
         if [ ! -f "$foundPath" ]; then
-            if [ $quiet -eq 0 ]; then
-                echoerr -e "\n\e[31mCouldn't find '${includes[i]}' in any of the given include paths. Skipping this.\e[0m
-  minDepth   = $minDepth
-  upperDir   = $upperDir -> $(cd "$upperDir" && pwd) [depth: $(getPathDepth "$upperDir")]
-  rootFolder = $rootFolder [depth: $(getPathDepth "$rootFolder")]
-  pwd        = $(pwd)
-  file       = $file
-"
-            fi
+            indent=$(( ($level+1) * 4))
+            printf '\e[31m%.*s' $indent "                                      "
+            printf '%s -> not found!\e[0m\n' "$includeFile"
             continue
         fi
 
-        printAllIncludes "$foundPath" $(($2+1))
+        printAllIncludes "$foundPath" $(($level+1))
     }
     done
 }
